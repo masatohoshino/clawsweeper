@@ -1052,7 +1052,12 @@ async function githubWebhook(request, env, ctx) {
 
   if ("type" in decision && decision.type === "item") {
     const deliveryId = request.headers.get("x-github-delivery") || "";
-    const itemDecision = decision as ExactReviewDecision & { installationId?: number };
+    let itemDecision = decision as ExactReviewDecision & { installationId?: number };
+    itemDecision = await withPullRequestEditContentRevision({
+      event,
+      payload,
+      decision: itemDecision,
+    });
     const sourceAuthority =
       itemDecision.itemKind === "pull_request"
         ? await reserveExactReviewSourceAuthority(env, {
@@ -1315,6 +1320,29 @@ function exactWebhookTimestamp(value) {
   return text && Number.isFinite(Date.parse(text)) ? text : null;
 }
 
+async function withPullRequestEditContentRevision({ event, payload, decision }) {
+  if (
+    event !== "pull_request" ||
+    decision.itemKind !== "pull_request" ||
+    decision.sourceAction !== "edited"
+  ) {
+    return decision;
+  }
+  const pullRequest = objectValue(payload.pull_request);
+  if (
+    typeof pullRequest.title !== "string" ||
+    (pullRequest.body !== null && typeof pullRequest.body !== "string")
+  ) {
+    return decision;
+  }
+  const title = pullRequest.title;
+  const body = pullRequest.body || "";
+  return {
+    ...decision,
+    sourceContentRevision: await sha256Text(JSON.stringify({ version: 1, title, body })),
+  };
+}
+
 function classifyGithubItemWebhook({ event, payload }) {
   const action = String(payload.action || "");
   const repo = objectValue(payload.repository);
@@ -1368,6 +1396,10 @@ function classifyGithubItemWebhook({ event, payload }) {
     const sourceHeadSha = String(objectValue(pullRequest.head).sha || "")
       .trim()
       .toLowerCase();
+    const sourceBaseSha = String(objectValue(pullRequest.base).sha || "")
+      .trim()
+      .toLowerCase();
+    const sourceIsDraft = pullRequest.draft;
     const sourceUpdatedAt = exactWebhookTimestamp(pullRequest.updated_at);
     return {
       accepted: true,
@@ -1380,6 +1412,8 @@ function classifyGithubItemWebhook({ event, payload }) {
       sourceEvent: "pull_request",
       sourceAction: action,
       ...(/^[0-9a-f]{40}$/.test(sourceHeadSha) ? { sourceHeadSha } : {}),
+      ...(/^[0-9a-f]{40}$/.test(sourceBaseSha) ? { sourceBaseSha } : {}),
+      ...(typeof sourceIsDraft === "boolean" ? { sourceIsDraft } : {}),
       ...(sourceUpdatedAt ? { sourceUpdatedAt } : {}),
       supersedesInProgress: [
         "edited",
